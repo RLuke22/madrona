@@ -295,7 +295,9 @@ uint zeroDummy()
                       min(0.0, abs(engineInstanceBuffer[0].data[0].x)) +
                       min(0.0, abs(float(indexBuffer[0]))) +
                       min(0.0, abs(lights[0].color.x)) +
-                      min(0.0, abs(depthInBuffer[0].SampleLevel(linearSampler, float2(0,0), 0).x));
+                      min(0.0, abs(depthInBuffer[0].SampleLevel(linearSampler, float2(0,0), 0).x)) +
+                      min(0.0, abs(gbufferNormal[0][uint3(0,0,0)].x)) +
+                      min(0.0, abs(gbufferPosition[0][uint3(0,0,0)].x));
 
 
     return zero_dummy;
@@ -630,16 +632,12 @@ void lighting(uint3 idx : SV_DispatchThreadID)
     if (length(normal.xyz) < 0.01) {
         out_color = float3(0.0, 0.0, 0.0);
     } else {
-        float4 point_radiance = getPointRadianceBRDF(roughness, metalness,
-                                                    gbuffer_data, view_data,
-                                                    uint2(gbuffer_pixel.x, gbuffer_pixel.y));
-        float3 radiance = point_radiance.xyz;
-        // Match raytracer: add 0.1 ambient floor so shadows aren't black
-        radiance += 0.0 * gbuffer_data.albedo.rgb;
-        const float exposure = 10.0;
-        float3 one = float3(1.0, 1.0, 1.0);
-        float3 exp_value = exp(-radiance / float3(2.0, 2.0, 2.0) * exposure);
-        out_color = one - exp_value;
+        // Raytracer-style lighting: N·L with 0.2 ambient floor, no PBR/sky/tone mapping
+        float3 light_dir = normalize(-lights[0].lightDir.xyz);
+        float ndotl = max(dot(normal.xyz, light_dir), 0.0);
+        float light_contrib = ndotl;
+        float3 radiance = max(0.05, light_contrib) * gbuffer_data.albedo.rgb;
+        out_color = clamp(radiance, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
     }
 
     out_color.x += zeroDummy();
