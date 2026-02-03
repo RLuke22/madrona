@@ -45,6 +45,7 @@ inline constexpr uint32_t maxDrawsPerLayeredImage = maxDrawsPerView * maxNumImag
 inline constexpr VkFormat colorOnlyFormat = VK_FORMAT_R8G8B8A8_UNORM;
 inline constexpr VkFormat depthOnlyFormat = VK_FORMAT_R32_SFLOAT;
 inline constexpr VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
+inline constexpr VkFormat gbufferFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 inline constexpr VkFormat outputColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
 inline constexpr uint32_t numDrawCmdBuffers = 4; // Triple buffering
 
@@ -100,6 +101,10 @@ static HeapArray<LayeredTarget> makeLayeredTargets(uint32_t width,
                                                    1,
                                                    depth_only ? consts::depthOnlyFormat : consts::colorOnlyFormat),
             .vizBufferView = {},
+            .gbufferNormal = depth_only ? render::vk::LocalImage::makeEmpty() : alloc.makeColorAttachment(image_width, image_height, 1, consts::gbufferFormat),
+            .gbufferNormalView = VK_NULL_HANDLE,
+            .gbufferPosition = depth_only ? render::vk::LocalImage::makeEmpty() : alloc.makeColorAttachment(image_width, image_height, 1, consts::gbufferFormat),
+            .gbufferPositionView = VK_NULL_HANDLE,
             .depth = alloc.makeDepthAttachment(image_width, image_height,
                                                1,
                                                consts::depthFormat),
@@ -126,6 +131,15 @@ static HeapArray<LayeredTarget> makeLayeredTargets(uint32_t width,
         view_info.image = target.vizBuffer.image;
         view_info.format = depth_only ? consts::depthOnlyFormat : consts::colorOnlyFormat;
         REQ_VK(dev.dt.createImageView(dev.hdl, &view_info, nullptr, &target.vizBufferView));
+
+        if (!depth_only) {
+            view_info.image = target.gbufferNormal.image;
+            view_info.format = consts::gbufferFormat;
+            view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            REQ_VK(dev.dt.createImageView(dev.hdl, &view_info, nullptr, &target.gbufferNormalView));
+            view_info.image = target.gbufferPosition.image;
+            REQ_VK(dev.dt.createImageView(dev.hdl, &view_info, nullptr, &target.gbufferPositionView));
+        }
 
         view_info.image = target.depth.image;
         view_info.format = consts::depthFormat;
@@ -257,17 +271,19 @@ static PipelineMP<1> makeDrawPipeline(const vk::Device &dev,
                                       VK_COLOR_COMPONENT_A_BIT;
     }
 
-    std::array<VkPipelineColorBlendAttachmentState, 1> blend_attachments {{
+    std::array<VkPipelineColorBlendAttachmentState, 3> blend_attachments_rgb {{
+        blend_attach,
+        blend_attach,
         blend_attach
     }};
+    std::array<VkPipelineColorBlendAttachmentState, 1> blend_attachments_depth {{ blend_attach }};
 
     VkPipelineColorBlendStateCreateInfo blend_info {};
     blend_info.sType =
         VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     blend_info.logicOpEnable = VK_FALSE;
-    blend_info.attachmentCount = 
-        static_cast<uint32_t>(blend_attachments.size());
-    blend_info.pAttachments = blend_attachments.data();
+    blend_info.attachmentCount = depth_only ? 1u : 3u;
+    blend_info.pAttachments = depth_only ? blend_attachments_depth.data() : blend_attachments_rgb.data();
 
     // Dynamic
     std::array dyn_enable {
@@ -336,11 +352,12 @@ static PipelineMP<1> makeDrawPipeline(const vk::Device &dev,
 
     VkFormat color_format = depth_only ? consts::depthOnlyFormat : consts::colorOnlyFormat;
     VkFormat depth_format = consts::depthFormat;
+    std::array<VkFormat, 3> color_formats_rgb = { color_format, consts::gbufferFormat, consts::gbufferFormat };
 
     VkPipelineRenderingCreateInfo rendering_info = {};
     rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rendering_info.colorAttachmentCount = 1;
-    rendering_info.pColorAttachmentFormats = &color_format;
+    rendering_info.colorAttachmentCount = depth_only ? 1u : 3u;
+    rendering_info.pColorAttachmentFormats = depth_only ? &color_format : color_formats_rgb.data();
     rendering_info.depthAttachmentFormat = depth_format;
 
     VkGraphicsPipelineCreateInfo gfx_info;
@@ -388,8 +405,9 @@ static PipelineMP<1> makeDrawPipeline(const vk::Device &dev,
 
 static vk::PipelineShaders makeShaders(const vk::Device &dev,
                                        const char *shader_file,
-                                       const char *func_name = "main",
-                                       VkSampler sampler = VK_NULL_HANDLE)
+                                       const char *func_name,
+                                       VkSampler sampler,
+                                       bool /* depth_only */)
 {
     (void)sampler;
 
@@ -409,8 +427,9 @@ static vk::PipelineShaders makeShaders(const vk::Device &dev,
 
 static vk::PipelineShaders makeShadersLighting(const vk::Device &dev,
                                        const char *shader_file,
-                                       const char *func_name = "main",
-                                       VkSampler repeat_sampler = VK_NULL_HANDLE)
+                                       const char *func_name,
+                                       VkSampler repeat_sampler,
+                                       bool depth_only)
 {
     std::filesystem::path shader_dir =
         std::filesystem::path(STRINGIFY(MADRONA_RENDER_DATA_DIR)) /
@@ -422,21 +441,24 @@ static vk::PipelineShaders makeShadersLighting(const vk::Device &dev,
         {}, {func_name, ShaderStage::Compute });
     
     StackAlloc tmp_alloc;
+    if (depth_only) {
+        return vk::PipelineShaders(dev, tmp_alloc,
+                                   Span<const SPIRVShader>(&spirv, 1),
+                                   Span<const vk::BindingOverride>({
+                                       vk::BindingOverride { 0, 0, VK_NULL_HANDLE, 100, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT },
+                                       vk::BindingOverride { 0, 3, VK_NULL_HANDLE, 100, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT },
+                                       vk::BindingOverride { 0, 4, repeat_sampler, 1, 0 },
+                                   }));
+    }
     return vk::PipelineShaders(dev, tmp_alloc,
-                               Span<const SPIRVShader>(&spirv, 1), 
+                               Span<const SPIRVShader>(&spirv, 1),
                                Span<const vk::BindingOverride>({
-                                   vk::BindingOverride {
-                                       0, 0, VK_NULL_HANDLE, 
-                                       100, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT 
-                                   },
-                                   vk::BindingOverride {
-                                       0, 3, VK_NULL_HANDLE,
-                                       100, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
-                                   },
-                                   vk::BindingOverride {
-                                       0, 4, repeat_sampler, 1, 0
-                                   },
-                                }));
+                                   vk::BindingOverride { 0, 0, VK_NULL_HANDLE, 100, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT },
+                                   vk::BindingOverride { 0, 3, VK_NULL_HANDLE, 100, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT },
+                                   vk::BindingOverride { 0, 4, repeat_sampler, 1, 0 },
+                                   vk::BindingOverride { 0, 5, VK_NULL_HANDLE, 100, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT },
+                                   vk::BindingOverride { 0, 6, VK_NULL_HANDLE, 100, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT },
+                               }));
 }
 
 template <typename T>
@@ -451,9 +473,7 @@ static PipelineMP<1> makeComputePipeline(const vk::Device &dev,
                                             const char *func_name = "main",
                                             T make_shaders_proc = makeShaders)
 {
-    (void)depth_only;
-
-    vk::PipelineShaders shader = make_shaders_proc(dev, shader_file, func_name, repeat_sampler);
+    vk::PipelineShaders shader = make_shaders_proc(dev, shader_file, func_name, repeat_sampler, depth_only);
 
     VkPushConstantRange push_const = {
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -859,13 +879,16 @@ static void makeBatchFrame(vk::Device& dev,
 
     {
         // Update lighting_set to point to the layered vbuffer and 
-        // output buffer
-        HeapArray<VkWriteDescriptorSet> lighting_desc_updates(
-            2*layered_targets.size() + 2);
-        HeapArray<VkDescriptorImageInfo> vbuffer_infos(
-            layered_targets.size());
-        HeapArray<VkDescriptorImageInfo> depth_buffer_infos(
-            layered_targets.size());
+        // output buffer. When !depth_only, also bind gbuffer normal and position (bindings 5, 6).
+        CountT num_updates = 2 * layered_targets.size() + 2;
+        if (!depth_only) {
+            num_updates += 2 * layered_targets.size();
+        }
+        HeapArray<VkWriteDescriptorSet> lighting_desc_updates(num_updates);
+        HeapArray<VkDescriptorImageInfo> vbuffer_infos(layered_targets.size());
+        HeapArray<VkDescriptorImageInfo> depth_buffer_infos(layered_targets.size());
+        HeapArray<VkDescriptorImageInfo> gbuffer_normal_infos(depth_only ? 0 : layered_targets.size());
+        HeapArray<VkDescriptorImageInfo> gbuffer_position_infos(depth_only ? 0 : layered_targets.size());
 
         for (CountT i = 0; i < layered_targets.size(); ++i) {
             vbuffer_infos[i] = {
@@ -892,6 +915,24 @@ static void makeBatchFrame(vk::Device& dev,
                                          3, i);
         }
 
+        CountT write_idx = 2 * layered_targets.size();
+        if (!depth_only) {
+            for (CountT i = 0; i < layered_targets.size(); ++i) {
+                gbuffer_normal_infos[i] = {
+                    .sampler = VK_NULL_HANDLE,
+                    .imageView = layered_targets[i].gbufferNormalView,
+                    .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                };
+                gbuffer_position_infos[i] = {
+                    .sampler = VK_NULL_HANDLE,
+                    .imageView = layered_targets[i].gbufferPositionView,
+                    .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                };
+                vk::DescHelper::storageImage(lighting_desc_updates[write_idx++], lighting_set, &gbuffer_normal_infos[i], 5, i);
+                vk::DescHelper::storageImage(lighting_desc_updates[write_idx++], lighting_set, &gbuffer_position_infos[i], 6, i);
+            }
+        }
+
         VkDescriptorBufferInfo rgb_buffer_info {
             .buffer = rgb_output_buffer.buf.buffer,
             .offset = 0,
@@ -899,7 +940,7 @@ static void makeBatchFrame(vk::Device& dev,
         };
 
         vk::DescHelper::storage(
-            lighting_desc_updates[lighting_desc_updates.size() - 2], 
+            lighting_desc_updates[write_idx++], 
             lighting_set, 
             &rgb_buffer_info,
             1);
@@ -911,7 +952,7 @@ static void makeBatchFrame(vk::Device& dev,
         };
 
         vk::DescHelper::storage(
-            lighting_desc_updates[lighting_desc_updates.size() - 1], 
+            lighting_desc_updates[write_idx], 
             lighting_set, 
             &depth_buffer_info,
             2);
@@ -963,11 +1004,30 @@ static void makeBatchFrame(vk::Device& dev,
 ////////////////////////////////////////////////////////////////////////////////
 static void issueRasterLayoutTransitions(vk::Device &dev, 
                                    LayeredTarget &target,
-                                   VkCommandBuffer &draw_cmd)
+                                   VkCommandBuffer &draw_cmd,
+                                   bool depth_only)
 {
-    // Transition image layouts
-    std::array barriers = {
-        VkImageMemoryBarrier{
+    std::vector<VkImageMemoryBarrier> barriers;
+    barriers.push_back(VkImageMemoryBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_NONE,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = target.vizBuffer.image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    });
+    if (!depth_only && target.gbufferNormal.image != VK_NULL_HANDLE) {
+        barriers.push_back(VkImageMemoryBarrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = nullptr,
             .srcAccessMask = VK_ACCESS_NONE,
@@ -976,34 +1036,40 @@ static void issueRasterLayoutTransitions(vk::Device &dev,
             .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = target.vizBuffer.image,
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1
-            }
-        },
-        VkImageMemoryBarrier{
+            .image = target.gbufferNormal.image,
+            .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
+        });
+        barriers.push_back(VkImageMemoryBarrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = nullptr,
             .srcAccessMask = VK_ACCESS_NONE,
-            .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = target.depth.image,
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1
-            }
-        },
-    };
+            .image = target.gbufferPosition.image,
+            .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
+        });
+    }
+    barriers.push_back(VkImageMemoryBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_NONE,
+        .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = target.depth.image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    });
 
     dev.dt.cmdPipelineBarrier(draw_cmd,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1015,11 +1081,31 @@ static void issueRasterLayoutTransitions(vk::Device &dev,
 
 static void issueComputeLayoutTransitions(vk::Device &dev, 
                                    LayeredTarget &target,
-                                   VkCommandBuffer &draw_cmd)
+                                   VkCommandBuffer &draw_cmd,
+                                   bool depth_only)
 {
     // Transition image layouts
-    std::array barriers = {
-        VkImageMemoryBarrier{
+    std::vector<VkImageMemoryBarrier> barriers;
+    barriers.push_back(VkImageMemoryBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = target.vizBuffer.image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    });
+    if (!depth_only && target.gbufferNormal.image != VK_NULL_HANDLE) {
+        barriers.push_back(VkImageMemoryBarrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = nullptr,
             .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -1028,35 +1114,40 @@ static void issueComputeLayoutTransitions(vk::Device &dev,
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = target.vizBuffer.image,
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1
-            }
-        },
-
-        VkImageMemoryBarrier{
+            .image = target.gbufferNormal.image,
+            .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
+        });
+        barriers.push_back(VkImageMemoryBarrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
             .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = target.depth.image,
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1
-            }
-        },
-    };
+            .image = target.gbufferPosition.image,
+            .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }
+        });
+    }
+    barriers.push_back(VkImageMemoryBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = target.depth.image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    });
 
     dev.dt.cmdPipelineBarrier(draw_cmd,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
@@ -1087,6 +1178,20 @@ static void issueRasterization(vk::Device &dev,
     color_attach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     color_attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
+    std::array<VkRenderingAttachmentInfoKHR, 3> color_attachments = { color_attach, {}, {} };
+    if (!depth_only && target.gbufferNormalView != VK_NULL_HANDLE) {
+        color_attachments[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+        color_attachments[1].imageView = target.gbufferNormalView;
+        color_attachments[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color_attachments[2].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+        color_attachments[2].imageView = target.gbufferPositionView;
+        color_attachments[2].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    }
+
     VkRenderingAttachmentInfoKHR depth_attach = {};
     depth_attach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
     depth_attach.imageView = target.depthView;
@@ -1103,8 +1208,8 @@ static void issueRasterization(vk::Device &dev,
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     rendering_info.renderArea = total_rect;
     rendering_info.layerCount = 1;
-    rendering_info.colorAttachmentCount = 1;
-    rendering_info.pColorAttachments = &color_attach;
+    rendering_info.colorAttachmentCount = (!depth_only && target.gbufferNormalView != VK_NULL_HANDLE) ? 3u : 1u;
+    rendering_info.pColorAttachments = color_attachments.data();
     rendering_info.pDepthAttachment = &depth_attach;
 
     dev.dt.cmdBeginRenderingKHR(draw_cmd, &rendering_info);
@@ -1416,6 +1521,10 @@ BatchRenderer::~BatchRenderer()
 
             for(int i2=0;i2<impl->batchFrames[i].targets.size();i2++){
                 impl->dev.dt.destroyImageView(impl->dev.hdl, impl->batchFrames[i].targets[i2].vizBufferView, nullptr);
+                if (impl->batchFrames[i].targets[i2].gbufferNormalView != VK_NULL_HANDLE) {
+                    impl->dev.dt.destroyImageView(impl->dev.hdl, impl->batchFrames[i].targets[i2].gbufferNormalView, nullptr);
+                    impl->dev.dt.destroyImageView(impl->dev.hdl, impl->batchFrames[i].targets[i2].gbufferPositionView, nullptr);
+                }
                 impl->dev.dt.destroyImageView(impl->dev.hdl, impl->batchFrames[i].targets[i2].depthView, nullptr);
             }
         }
@@ -2004,7 +2113,8 @@ void BatchRenderer::renderViews(BatchRenderInfo info,
         // Now, start the rasterization
         issueRasterLayoutTransitions(impl->dev,
                 target,
-                draw_cmd);
+                draw_cmd,
+                impl->depthOnly);
 
         // Begin rendering
         issueRasterization(impl->dev,
@@ -2021,7 +2131,8 @@ void BatchRenderer::renderViews(BatchRenderInfo info,
 
         issueComputeLayoutTransitions(impl->dev,
                                target,
-                               draw_cmd);
+                               draw_cmd,
+                               impl->depthOnly);
 
         issueMemoryBarrier(impl->dev, draw_cmd,
                            VK_ACCESS_SHADER_READ_BIT,
@@ -2287,7 +2398,8 @@ void BatchRenderer::renderViews(BatchRenderInfo info,
             
             issueRasterLayoutTransitions(impl->dev,
                                    frame_data.targets[batch_no],
-                                   draw_cmd);
+                                   draw_cmd,
+                                   impl->depthOnly);
         }
 
         for (int batch = 0; batch < (int)cur_num_batches; ++batch) {
@@ -2312,7 +2424,8 @@ void BatchRenderer::renderViews(BatchRenderInfo info,
             
             issueComputeLayoutTransitions(impl->dev,
                                    frame_data.targets[batch_no],
-                                   draw_cmd);
+                                   draw_cmd,
+                                   impl->depthOnly);
         }
 
         issueMemoryBarrier(impl->dev, draw_cmd,

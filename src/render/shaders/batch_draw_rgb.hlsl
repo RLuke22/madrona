@@ -44,6 +44,8 @@ struct V2F {
     [[vk::location(0)]] float2 uv : TEXCOORD0;
     [[vk::location(1)]] int materialIdx : TEXCOORD1;
     [[vk::location(2)]] uint color : TEXCOORD2;
+    [[vk::location(3)]] float3 worldNormal : TEXCOORD3;
+    [[vk::location(4)]] float3 worldPosition : TEXCOORD4;
 };
 
 float4 composeQuats(float4 a, float4 b)
@@ -210,6 +212,11 @@ float4 vert(in uint vid : SV_VertexID,
 
     v2f.uv = vert.uv;
 
+    float3 world_pos = rotateVec(instance_data.rotation, instance_data.scale * vert.position) + instance_data.position;
+    float3 world_normal = normalize(rotateVec(instance_data.rotation, vert.normal / instance_data.scale));
+    v2f.worldPosition = world_pos;
+    v2f.worldNormal = world_normal;
+
 #if 0
     if (instance_data.matID == -1) {
         v2f.materialIdx = meshDataBuffer[draw_data.meshID].materialIndex;
@@ -258,6 +265,8 @@ uint3 unpackVizBufferData(in uint2 data)
 
 struct PixelOutput {
     float4 rgbOut : SV_Target0;
+    float4 normalOut : SV_Target1;
+    float4 positionOut : SV_Target2;
 };
 
 [shader("pixel")]
@@ -268,18 +277,22 @@ PixelOutput frag(in V2F v2f,
 
     if (v2f.materialIdx == -2) {
         output.rgbOut = hexToRgb(v2f.color);
-
+        output.rgbOut.a = 0.8;
+        output.normalOut = float4(normalize(v2f.worldNormal), 1.0);
+        output.positionOut = float4(v2f.worldPosition, 0.2);
         return output;
     } else {
         MaterialData mat_data = materialBuffer[v2f.materialIdx];
         float4 color = mat_data.color;
-        
+
         if (mat_data.textureIdx != -1) {
             color *= materialTexturesArray[mat_data.textureIdx].SampleLevel(
                     linearSampler, v2f.uv, 0);
         }
 
-        output.rgbOut = color;
+        output.rgbOut = float4(color.rgb, mat_data.roughness);
+        output.normalOut = float4(normalize(v2f.worldNormal), 1.0);
+        output.positionOut = float4(v2f.worldPosition, mat_data.metalness);
 
         return output;
     }

@@ -10,6 +10,12 @@ DeferredLightingPushConstBR pushConst;
 [[vk::binding(0, 0)]]
 RWTexture2DArray<float4> vizBuffer[];
 
+[[vk::binding(5, 0)]]
+Texture2DArray<float4> gbufferNormal[];
+
+[[vk::binding(6, 0)]]
+Texture2DArray<float4> gbufferPosition[];
+
 [[vk::binding(1, 0)]]
 RWStructuredBuffer<uint32_t> rgbOutputBuffer;
 
@@ -591,31 +597,50 @@ void lighting(uint3 idx : SV_DispatchThreadID)
     // float depth = depthInBuffer[target_idx].SampleLevel(linearSampler,
                                                         // sample_uv, 0).x;
 
-    float4 color = vizBuffer[target_idx][vbuffer_pixel + 
-                     uint3(x_pixel_offset, y_pixel_offset, 0)];
+    uint3 gbuffer_pixel = vbuffer_pixel + uint3(x_pixel_offset, y_pixel_offset, 0);
+    float4 color = vizBuffer[target_idx][gbuffer_pixel];
+    float4 normal = gbufferNormal[target_idx][gbuffer_pixel];
+    float4 position = gbufferPosition[target_idx][gbuffer_pixel];
 
     uint2 depth_dim;
     depthInBuffer[target_idx].GetDimensions(
         depth_dim.x, depth_dim.y);
 
-    float2 depth_uv = float2(vbuffer_pixel.x + x_pixel_offset, 
-                             vbuffer_pixel.y + y_pixel_offset) / 
+    float2 depth_uv = float2(vbuffer_pixel.x + x_pixel_offset,
+                             vbuffer_pixel.y + y_pixel_offset) /
                       float2(depth_dim.x, depth_dim.y);
 
-    // printf("%f %f\n", depth_uv.x, depth_uv.y);
-
-    float depth_in = // depthInBuffer[target_idx][vbuffer_pixel + 
-                     // uint3(x_pixel_offset, y_pixel_offset, 0)].x;
-                     depthInBuffer[target_idx].SampleLevel(
+    float depth_in = depthInBuffer[target_idx].SampleLevel(
                          linearSampler, depth_uv, 0).x;
 
-    float z_near = unpackViewData(viewDataBuffer[0]).zNear;
-
+    PerspectiveCameraData view_data = unpackViewData(viewDataBuffer[view_idx]);
+    float z_near = view_data.zNear;
     float depth = abs(z_near / depth_in);
-    // float depth = abs(depth_in);
 
+    float roughness = color.a;
+    float metalness = position.a;
 
-    float3 out_color = color.rgb;
+    GBufferData gbuffer_data;
+    gbuffer_data.wPosition = position.xyz;
+    gbuffer_data.wNormal = normal.xyz;
+    gbuffer_data.albedo = color.rgb;
+    gbuffer_data.wCameraPos = view_data.pos.xyz;
+
+    float3 out_color;
+    if (length(normal.xyz) < 0.01) {
+        out_color = float3(0.0, 0.0, 0.0);
+    } else {
+        float4 point_radiance = getPointRadianceBRDF(roughness, metalness,
+                                                    gbuffer_data, view_data,
+                                                    uint2(gbuffer_pixel.x, gbuffer_pixel.y));
+        float3 radiance = point_radiance.xyz;
+        // Match raytracer: add 0.1 ambient floor so shadows aren't black
+        radiance += 0.0 * gbuffer_data.albedo.rgb;
+        const float exposure = 10.0;
+        float3 one = float3(1.0, 1.0, 1.0);
+        float3 exp_value = exp(-radiance / float3(2.0, 2.0, 2.0) * exposure);
+        out_color = one - exp_value;
+    }
 
     out_color.x += zeroDummy();
 
@@ -623,6 +648,6 @@ void lighting(uint3 idx : SV_DispatchThreadID)
         view_idx * pushConst.viewDim * pushConst.viewDim +
         idx.y * pushConst.viewDim + idx.x;
 
-    rgbOutputBuffer[out_pixel_idx] = linearToSRGB8(out_color); 
+    rgbOutputBuffer[out_pixel_idx] = linearToSRGB8(out_color);
     depthOutputBuffer[out_pixel_idx] = depth;
 }

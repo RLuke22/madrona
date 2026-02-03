@@ -24,6 +24,12 @@ struct LayeredTarget {
     render::vk::LocalImage vizBuffer;
     VkImageView vizBufferView;
 
+    // GBuffer: normal and position (for deferred lighting; only used when not depth_only)
+    render::vk::LocalImage gbufferNormal;
+    VkImageView gbufferNormalView;
+    render::vk::LocalImage gbufferPosition;
+    VkImageView gbufferPositionView;
+
     // Depth
     render::vk::LocalImage depth;
     VkImageView depthView;
