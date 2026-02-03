@@ -636,7 +636,7 @@ void lighting(uint3 idx : SV_DispatchThreadID)
         float3 light_dir = normalize(-lights[0].lightDir.xyz);
         float ndotl = max(dot(normal.xyz, light_dir), 0.0);
         float light_contrib = ndotl;
-        float3 radiance = max(0.05, light_contrib) * gbuffer_data.albedo.rgb;
+        float3 radiance = max(0.2, light_contrib) * gbuffer_data.albedo.rgb;
         out_color = clamp(radiance, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
     }
 
