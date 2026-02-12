@@ -142,8 +142,8 @@ inline void instanceTransformUpdate(Context &ctx,
     // it in the TLBVHNode structure.
 
 #ifdef MADRONA_GPU_MODE
-    bool raycast_enabled = 
-        mwGPU::GPUImplConsts::get().raycastOutputResolution != 0;
+    bool raycast_enabled =
+        mwGPU::GPUImplConsts::get().raycastOutputWidth != 0;
 
     if (raycast_enabled) {
         MeshBVH *bvh = (MeshBVH *)
@@ -256,8 +256,8 @@ inline void instanceTransformUpdateWithMat(Context &ctx,
     // it in the TLBVHNode structure.
 
 #ifdef MADRONA_GPU_MODE
-    bool raycast_enabled = 
-        mwGPU::GPUImplConsts::get().raycastOutputResolution != 0;
+    bool raycast_enabled =
+        mwGPU::GPUImplConsts::get().raycastOutputWidth != 0;
 
     if (raycast_enabled) {
         MeshBVH *bvh = (MeshBVH *)
@@ -382,11 +382,13 @@ void registerTypes(ECSRegistry &registry,
                    const RenderECSBridge *bridge)
 {
 #ifdef MADRONA_GPU_MODE
-    uint32_t render_output_res = 
-        mwGPU::GPUImplConsts::get().raycastOutputResolution;
+    uint32_t render_output_width =
+        mwGPU::GPUImplConsts::get().raycastOutputWidth;
+    uint32_t render_output_height =
+        mwGPU::GPUImplConsts::get().raycastOutputHeight;
 
-    uint32_t rgb_output_bytes = render_output_res * render_output_res * 4;
-    uint32_t depth_output_bytes = render_output_res * render_output_res * 4;
+    uint32_t rgb_output_bytes = render_output_width * render_output_height * 4;
+    uint32_t depth_output_bytes = render_output_width * render_output_height * 4;
 
     // Make sure to have something there even if raycasting was disabled.
     if (depth_output_bytes == 0) {
@@ -627,8 +629,8 @@ void init(Context &ctx,
     }
 
 #if 0
-    bool raycast_enabled = 
-        mwGPU::GPUImplConsts::get().raycastOutputResolution != 0;
+    bool raycast_enabled =
+        mwGPU::GPUImplConsts::get().raycastOutputWidth != 0;
 
     system_state.enableRaycaster = raycast_enabled;
 #endif
@@ -682,8 +684,8 @@ void attachEntityToView(Context &ctx,
     };
 
 #ifdef MADRONA_GPU_MODE
-    bool raycast_enabled = 
-        mwGPU::GPUImplConsts::get().raycastOutputResolution != 0;
+    bool raycast_enabled =
+        mwGPU::GPUImplConsts::get().raycastOutputWidth != 0;
 #else
     bool raycast_enabled = false;
 #endif

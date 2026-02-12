@@ -457,7 +457,8 @@ struct MWCudaExecutor::Impl {
     CUfunction destroyKernel;
 
     uint32_t numWorlds;
-    uint32_t renderOutputResolution;
+    uint32_t renderOutputWidth;
+    uint32_t renderOutputHeight;
     uint32_t sharedMemPerSM;
 
     std::vector<TimingGroup> timingGroups;
@@ -1816,12 +1817,14 @@ static GPUEngineState initEngineAndUserState(
     void *bvh_internals;
     void *bvh_ptrs;
     uint32_t num_bvhs;
-    uint32_t raycast_output_resolution;
+    uint32_t raycast_output_width;
+    uint32_t raycast_output_height;
     if (render_cfg.has_value()) {
         bvh_ptrs = render_cfg->geoBVHData.meshBVHs;
         num_bvhs = (uint32_t)render_cfg->geoBVHData.numBVHs;
 
-        raycast_output_resolution = render_cfg->renderResolution;
+        raycast_output_width = render_cfg->renderResolutionWidth;
+        raycast_output_height = render_cfg->renderResolutionHeight;
 
         bvh_internals = cu::allocGPU(
             sizeof(mwGPU::madrona::BVHInternalData));
@@ -1829,7 +1832,8 @@ static GPUEngineState initEngineAndUserState(
         bvh_ptrs = nullptr;
         num_bvhs = 0;
 
-        raycast_output_resolution = 0;
+        raycast_output_width = 0;
+        raycast_output_height = 0;
 
         bvh_internals = nullptr;
     }
@@ -1842,7 +1846,8 @@ static GPUEngineState initEngineAndUserState(
                                                    gpu_state_size_readback,
                                                    bvh_ptrs,
                                                    num_bvhs,
-                                                   raycast_output_resolution,
+                                                   raycast_output_width,
+                                                   raycast_output_height,
                                                    bvh_internals,
                                                    bvh_kernels.raycastRGBD);
 
@@ -2411,7 +2416,8 @@ MWCudaExecutor::MWCudaExecutor(
         bvh_kernels,
         gpu_kernels.destroyECS,
         state_cfg.numWorlds,
-        render_cfg.has_value() ? render_cfg->renderResolution : 0,
+        render_cfg.has_value() ? render_cfg->renderResolutionWidth : 0,
+        render_cfg.has_value() ? render_cfg->renderResolutionHeight : 0,
         (uint32_t)shared_mem_per_sm,
         {}
     });
@@ -2665,13 +2671,14 @@ MWCudaLaunchGraph MWCudaExecutor::buildRenderGraph()
 
     const uint32_t pixels_per_block = 8;
 
-    uint32_t grid_dim = impl_->renderOutputResolution / pixels_per_block;
+    uint32_t grid_dim_x = (impl_->renderOutputWidth + pixels_per_block - 1) / pixels_per_block;
+    uint32_t grid_dim_y = (impl_->renderOutputHeight + pixels_per_block - 1) / pixels_per_block;
 
     CUDA_KERNEL_NODE_PARAMS bvh_launch_raycast = {
         .func = bvh_kernels.raycast,
         .gridDimX = bvh_kernels.numSMs * num_resident_views_per_sm,
-        .gridDimY = grid_dim,
-        .gridDimZ = grid_dim,
+        .gridDimY = grid_dim_x,
+        .gridDimZ = grid_dim_y,
         .blockDimX = pixels_per_block,
         .blockDimY = pixels_per_block,
         .blockDimZ = 1,

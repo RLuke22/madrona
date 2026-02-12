@@ -66,7 +66,8 @@ inline Vector3 calculateOutRay(PerspectiveCameraData *view_data,
     const float h = 1.0f / (-view_data->yScale);
 
     const auto viewport_height = 2 * h;
-    const auto viewport_width = viewport_height;
+    const float aspect = (float)bvhParams.renderOutputWidth / (float)bvhParams.renderOutputHeight;
+    const auto viewport_width = viewport_height * aspect;
     const auto forward = look_at.normalize();
 
     auto u = rot.inv().rotateVec({1, 0, 0});
@@ -77,8 +78,8 @@ inline Vector3 calculateOutRay(PerspectiveCameraData *view_data,
 
     auto lower_left_corner = ray_start - horizontal / 2 - vertical / 2 + forward;
   
-    float pixel_u = ((float)pixel_x + 0.5f) / (float)bvhParams.renderOutputResolution;
-    float pixel_v = ((float)pixel_y + 0.5f) / (float)bvhParams.renderOutputResolution;
+    float pixel_u = ((float)pixel_x + 0.5f) / (float)bvhParams.renderOutputWidth;
+    float pixel_v = ((float)pixel_y + 0.5f) / (float)bvhParams.renderOutputHeight;
 
     Vector3 ray_dir = lower_left_corner + pixel_u * horizontal + 
         pixel_v * vertical - ray_start;
@@ -952,13 +953,18 @@ extern "C" __global__ void bvhRaycastEntry()
 
     uint32_t current_view_offset = resident_view_offset;
 
-    uint32_t bytes_per_view =
-        bvhParams.renderOutputResolution * bvhParams.renderOutputResolution * 4;
+    const uint32_t output_width = bvhParams.renderOutputWidth;
+    const uint32_t output_height = bvhParams.renderOutputHeight;
+    uint32_t bytes_per_view = output_width * output_height * 4;
 
     uint32_t num_processed_pixels = 0;
 
     uint32_t pixel_x = blockIdx.y * pixels_per_block + threadIdx.x;
     uint32_t pixel_y = blockIdx.z * pixels_per_block + threadIdx.y;
+
+    if (pixel_x >= output_width || pixel_y >= output_height) {
+        return;
+    }
 
     while (current_view_offset < total_num_views) {
         // While we still have views to generate, trace.
@@ -997,7 +1003,7 @@ extern "C" __global__ void bvhRaycastEntry()
 
 
         uint32_t linear_pixel_idx = 4 * 
-            (pixel_x + pixel_y * bvhParams.renderOutputResolution);
+            (pixel_x + pixel_y * output_width);
 
         uint32_t global_pixel_byte_off = current_view_offset * bytes_per_view +
             linear_pixel_idx;
