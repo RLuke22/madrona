@@ -911,11 +911,11 @@ static __device__ FragmentResult computeFragment(
                             }, world_info);
 
                     if (!shadow_hit.hit) {
-                        light_contrib += fminf(fmaxf(first_hit.normal.dot(light_dir), 0.f), 1.f);
+                        light_contrib += fminf(fmaxf(first_hit.normal.dot(light_dir), 0.f), 1.f) * desc.intensity;
                     }
                 }
             } else {
-                light_contrib += fminf(fmaxf(first_hit.normal.dot(light_dir), 0.f), 1.f);
+                light_contrib += fminf(fmaxf(first_hit.normal.dot(light_dir), 0.f), 1.f) * desc.intensity;
             }
         }
 
